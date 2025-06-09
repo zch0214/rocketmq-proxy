@@ -7,30 +7,22 @@ import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.SocketChannel;
 import io.netty.channel.socket.nio.NioServerSocketChannel;
 import io.netty.channel.socket.nio.NioSocketChannel;
-import org.apache.rocketmq.remoting.protocol.RequestCode;
 import org.apache.rocketmq.remoting.protocol.RemotingCommand;
+import org.apache.rocketmq.remoting.protocol.ResponseCode;
 import org.apache.rocketmq.remoting.netty.NettyDecoder;
 import org.apache.rocketmq.remoting.netty.NettyEncoder;
-import org.apache.rocketmq.remoting.protocol.ResponseCode;
-import org.apache.rocketmq.remoting.protocol.route.BrokerData;
-import org.apache.rocketmq.remoting.protocol.route.TopicRouteData;
 
-import java.util.DoubleSummaryStatistics;
-import java.util.HashMap;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
 
 public class BrokerProxy {
 
     private final int localPort;
-    private final String nameServerHost;
-    private final int nameServerPort;
     private final String brokerHost;
     private final int brokerPort;
 
-    public BrokerProxy(int localPort, String nameServerHost, int nameServerPort,
-                       String brokerHost, int brokerPort) {
+    public BrokerProxy(int localPort, String brokerHost, int brokerPort) {
         this.localPort = localPort;
-        this.nameServerHost = nameServerHost;
-        this.nameServerPort = nameServerPort;
         this.brokerHost = brokerHost;
         this.brokerPort = brokerPort;
     }
@@ -48,7 +40,7 @@ public class BrokerProxy {
                         protected void initChannel(SocketChannel ch) {
                             ch.pipeline().addLast(new NettyDecoder());
                             ch.pipeline().addLast(new NettyEncoder());
-                            ch.pipeline().addLast(new ProxyHandler(nameServerHost, nameServerPort, brokerHost, brokerPort));
+                            ch.pipeline().addLast(new ProxyHandler(brokerHost, brokerPort));
                         }
                     })
                     .option(ChannelOption.SO_BACKLOG, 128)
@@ -64,15 +56,14 @@ public class BrokerProxy {
     }
 
     private static class ProxyHandler extends SimpleChannelInboundHandler<RemotingCommand> {
-        private final String nameServerHost;
-        private final int nameServerPort;
         private final String brokerHost;
         private final int brokerPort;
+        // 连接池 - 键为目标地址，值为Channel
+        private final ConcurrentHashMap<String, Channel> channelPool = new ConcurrentHashMap<>();
+        // 重试配置
+        private static final int MAX_RETRY_TIMES = 2;
 
-        public ProxyHandler(String nameServerHost, int nameServerPort,
-                            String brokerHost, int brokerPort) {
-            this.nameServerHost = nameServerHost;
-            this.nameServerPort = nameServerPort;
+        public ProxyHandler(String brokerHost, int brokerPort) {
             this.brokerHost = brokerHost;
             this.brokerPort = brokerPort;
         }
@@ -83,107 +74,72 @@ public class BrokerProxy {
 
             // 打印请求日志
             System.out.println("[PROXY] Received request with code: " + RequestCodeUtil.getCodeName(requestCode));
-
-            // 判断请求类型并转发
-//            if (isNameServerRequest(requestCode)) {
-//                forwardToNameServer(ctx, msg);
-//            } else if (isBrokerRequest(requestCode)) {
-                forwardToBroker(ctx, msg);
-//            } else {
-//                System.out.println("[PROXY] Unknown request type: " + RequestCodeUtil.getCodeName(requestCode));
-//                ctx.close();
-//            }
+            forwardToBroker(ctx, msg, 0);
         }
 
-        private boolean isNameServerRequest(int requestCode) {
-            return requestCode == RequestCode.GET_ROUTEINFO_BY_TOPIC
-                    || requestCode == RequestCode.GET_BROKER_CLUSTER_INFO
-                    || requestCode == RequestCode.UNREGISTER_CLIENT
-                    || requestCode == RequestCode.REGISTER_BROKER;
-        }
-
-        private boolean isBrokerRequest(int requestCode) {
-            return requestCode == RequestCode.SEND_MESSAGE
-                    || requestCode == RequestCode.SEND_MESSAGE_V2
-                    || requestCode == RequestCode.GET_CONSUMER_LIST_BY_GROUP
-                    || requestCode == RequestCode.QUERY_CONSUMER_OFFSET
-                    || requestCode == RequestCode.PULL_MESSAGE
-                    || requestCode == RequestCode.HEART_BEAT;
-        }
-
-//        private void forwardToNameServer(ChannelHandlerContext ctx, RemotingCommand request) {
-//            forwardRequest(ctx, request, nameServerHost, nameServerPort, "NameServer");
-//        }
-
-        private void forwardToBroker(ChannelHandlerContext ctx, RemotingCommand request) {
-//            if (request.getCode() == RequestCode.SEND_MESSAGE||request.getCode()==RequestCode.SEND_MESSAGE_V2) {
-//                try {
-//                    EnhanceUtil.enhanceSendMessageRequest(request);
-//                    System.out.println("发送增强后："+request);
-//                } catch (Exception e) {
-//                    System.err.println("[PROXY] Enhance message failed: " + e.getMessage());
-//                    ctx.close();
-//                    return;
-//                }
-//
-//            }
-//
-//            if(request.getCode()==RequestCode.PULL_MESSAGE){
-//                EnhanceUtil.filterPullMessageRequest(request);
-//                System.out.println("拉取增强后："+request);
-//            }
-            forwardRequest(ctx, request, brokerHost, brokerPort, "Broker");
-        }
-
-        private void forwardRequest(ChannelHandlerContext ctx, RemotingCommand request,
-                                    String host, int port, String targetName) {
+        private void forwardToBroker(ChannelHandlerContext ctx, RemotingCommand request, int retryCount) {
+            String channelKey = brokerHost + ":" + brokerPort;
+            
+            // 尝试从连接池获取已有连接
+            Channel channel = channelPool.get(channelKey);
+            if (channel != null && channel.isActive()) {
+                // 使用现有连接
+                channel.writeAndFlush(request).addListener((ChannelFutureListener) writeFuture -> {
+                    if (!writeFuture.isSuccess()) {
+                        // 发送失败，移除失效连接并重试
+                        channelPool.remove(channelKey);
+                        retryOrFail(ctx, request, retryCount, writeFuture.cause());
+                    }
+                });
+                return;
+            }
+            
+            // 创建新连接
             Bootstrap b = new Bootstrap();
             b.group(ctx.channel().eventLoop())
                     .channel(NioSocketChannel.class)
-                    .handler(new ChannelInitializer<SocketChannel>() {
-                        @Override
-                        protected void initChannel(SocketChannel ch) {
-                            ch.pipeline().addLast(new NettyDecoder());
-                            ch.pipeline().addLast(new NettyEncoder());
-                            ch.pipeline().addLast(new SimpleChannelInboundHandler<RemotingCommand>() {
-                                @Override
-                                protected void channelRead0(ChannelHandlerContext targetCtx,
-                                                            RemotingCommand response) {
-                                    System.out.println("[PROXY] Received response from " + targetName);
-                                    System.out.println("[PROXY] Received response is: " + response);
-                                    System.out.println("[PROXY] Received response is: " + response.getBody());
-                                    if(request.getCode()==RequestCode.GET_ROUTEINFO_BY_TOPIC&&response.getCode()==ResponseCode.SUCCESS){
-                                        byte[] body = response.getBody();
-                                        if (body != null) {
-                                            TopicRouteData data = TopicRouteData.decode(body, TopicRouteData.class);
+                    .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, 3000) // 连接超时设置
+                    .handler(new BrokerResponseHandler(ctx));
 
-                                            for (BrokerData brokerData : data.getBrokerDatas()) {
-                                                HashMap<Long, String> newBrokerAddrs = new HashMap<>();
-                                                for (Long key : brokerData.getBrokerAddrs().keySet()) {
-                                                    newBrokerAddrs.put(key, "127.0.0.1:9877");
-                                                }
-                                                brokerData.setBrokerAddrs(newBrokerAddrs);
-                                            }
-                                            System.out.println("修改后："+data);
-                                            response.setBody(data.encode());
-                                        }
-                                    }
-                                    ctx.writeAndFlush(response);
-                                }
-                            });
-                        }
-                    });
-
-            ChannelFuture f = b.connect(host, port);
+            ChannelFuture f = b.connect(brokerHost, brokerPort);
             f.addListener((ChannelFutureListener) future -> {
                 if (future.isSuccess()) {
-                    System.out.println("[PROXY] Forwarding request to " + targetName + " at " + host + ":" + port);
-                    future.channel().writeAndFlush(request);
+                    // 连接成功，保存到连接池
+                    System.out.println("[PROXY] Forwarding request to broker at " + brokerHost + ":" + brokerPort);
+                    Channel newChannel = future.channel();
+                    channelPool.put(channelKey, newChannel);
+                    
+                    // 添加连接关闭监听器，自动从连接池移除
+                    newChannel.closeFuture().addListener((ChannelFutureListener) closeFuture -> {
+                        channelPool.remove(channelKey);
+                    });
+                    
+                    // 发送请求
+                    newChannel.writeAndFlush(request);
                 } else {
-                    System.out.println("[PROXY] Failed to connect to " + targetName);
-                    ctx.close();
+                    // 连接失败，尝试重试
+                    System.out.println("[PROXY] Failed to connect to broker: " + future.cause().getMessage());
+                    retryOrFail(ctx, request, retryCount, future.cause());
                 }
             });
+        }
+        
+        private void retryOrFail(ChannelHandlerContext ctx, RemotingCommand request, 
+                                int retryCount, Throwable cause) {
+            if (retryCount < MAX_RETRY_TIMES) {
+                // 重试
+                ctx.executor().execute(() -> {
+                    forwardToBroker(ctx, request, retryCount + 1);
+                });
+            } else {
+                // 超过最大重试次数，返回错误响应
+                System.out.println("[PROXY] Failed to connect to broker after retries");
+                RemotingCommand response = RemotingCommand.createResponseCommand(
+                        ResponseCode.SYSTEM_ERROR,
+                        "Failed to connect to broker");
+                response.setOpaque(request.getOpaque()); // 保持请求-响应的匹配
+                ctx.writeAndFlush(response);
+            }
         }
 
         @Override
@@ -191,12 +147,41 @@ public class BrokerProxy {
             System.out.println("[PROXY] Error: " + cause.getMessage());
             ctx.close();
         }
+        
+        // 提取内部类，使代码结构更清晰
+        private class BrokerResponseHandler extends ChannelInitializer<SocketChannel> {
+            private final ChannelHandlerContext clientCtx;
+            
+            public BrokerResponseHandler(ChannelHandlerContext clientCtx) {
+                this.clientCtx = clientCtx;
+            }
+            
+            @Override
+            protected void initChannel(SocketChannel ch) {
+                ch.pipeline().addLast(new NettyDecoder());
+                ch.pipeline().addLast(new NettyEncoder());
+                ch.pipeline().addLast(new SimpleChannelInboundHandler<RemotingCommand>() {
+                    @Override
+                    protected void channelRead0(ChannelHandlerContext brokerCtx, RemotingCommand response) {
+                        System.out.println("[PROXY] Received response from broker."+response);
+
+                        // 转发响应给客户端
+                        clientCtx.writeAndFlush(response);
+                    }
+                    
+                    @Override
+                    public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
+                        System.out.println("[PROXY] Error in broker response handler: " + cause.getMessage());
+                        ctx.close();
+                    }
+                });
+            }
+        }
     }
 
-
     public static void main(String[] args) throws InterruptedException {
-        // 代理监听9877端口，转发NameServer请求到9876端口，Broker请求到10911端口
-        BrokerProxy proxy = new BrokerProxy(8888, "localhost", 9876, "localhost", 10911);
+        // 代理监听8888端口，转发请求到localhost:10911
+        BrokerProxy proxy = new BrokerProxy(8888, "localhost", 10911);
         proxy.start();
     }
 }
