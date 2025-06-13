@@ -27,6 +27,7 @@ public class CustomConsumerAnother {
                             msg.getTags(),
                             msg.getKeys(),
                             new String(msg.getBody()));
+                    System.out.println(msg.getUserProperty("gray")+"-----"+msg.getUserProperty("forTest")+"-----"+msg.getUserProperty("blue"));
                 }
                 return ConsumeConcurrentlyStatus.CONSUME_SUCCESS;
             }

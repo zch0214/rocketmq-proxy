@@ -1,6 +1,7 @@
 package com.example.demo;
 
 import org.apache.rocketmq.client.consumer.DefaultMQPushConsumer;
+import org.apache.rocketmq.client.consumer.MessageSelector;
 import org.apache.rocketmq.client.consumer.listener.ConsumeConcurrentlyContext;
 import org.apache.rocketmq.client.consumer.listener.ConsumeConcurrentlyStatus;
 import org.apache.rocketmq.client.consumer.listener.MessageListenerConcurrently;
@@ -15,7 +16,8 @@ public class CustomConsumer {
 
         // 订阅Topic和Tag(*表示所有Tag)
         consumer.subscribe("test-topic", "Tag1");
-
+//        consumer.subscribe("test-topic_001", "Tag2");
+//        consumer.subscribe("test-topic_002", MessageSelector.bySql("gray IS NOT NULL AND gray='true'"));
         // 注册回调处理消息
         consumer.registerMessageListener(new MessageListenerConcurrently() {
             @Override
@@ -27,6 +29,7 @@ public class CustomConsumer {
                             msg.getTags(),
                             msg.getKeys(),
                             new String(msg.getBody()));
+                    System.out.println(msg.getUserProperty("gray")+"-----"+msg.getUserProperty("forTest")+"-----"+msg.getUserProperty("blue"));
                 }
                 return ConsumeConcurrentlyStatus.CONSUME_SUCCESS;
             }

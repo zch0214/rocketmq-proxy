@@ -1,6 +1,6 @@
 package com.example.demo;
 
-import org.apache.rocketmq.remoting.protocol.RequestCode;
+import  org.apache.rocketmq.common.protocol.RequestCode;
 
 import java.lang.reflect.Field;
 import java.util.HashMap;

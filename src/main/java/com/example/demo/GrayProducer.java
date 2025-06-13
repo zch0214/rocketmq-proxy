@@ -4,22 +4,22 @@ import org.apache.rocketmq.common.message.Message;
 
 import java.util.Date;
 
-public class CustomProducer {
+public class GrayProducer {
     public static void main(String[] args) throws Exception {
         DefaultMQProducer producer = new DefaultMQProducer("ProducerGroupName");
-        producer.setNamesrvAddr("localhost:9999");
+//        producer.setNamesrvAddr("localhost:9876");
+        producer.setNamesrvAddr("localhost:9876");
         producer.start();
 
-        String dateStr = new Date().toString();
         Message msg = new Message(
                 "test-topic",  // Topic
                 "Tag1",    // Tag
-                "YourKey",        // Key
-                dateStr.getBytes() // Body
+                "original_gray3",        // Key
+                new String(new Date().toString()).getBytes() // Body
         );
-        msg.putUserProperty("forTest", "ahaha");
-        msg.putUserProperty("grayNode", "fals");
-        System.out.println("send message: " + dateStr);
+
+        msg.putUserProperty("gray", "true");
+        System.out.println("send message："+msg);
         producer.send(msg);
 
         producer.shutdown();

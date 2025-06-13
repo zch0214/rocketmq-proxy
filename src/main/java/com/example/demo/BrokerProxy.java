@@ -8,10 +8,12 @@ import io.netty.channel.socket.SocketChannel;
 import io.netty.channel.socket.nio.NioServerSocketChannel;
 import io.netty.channel.socket.nio.NioSocketChannel;
 import org.apache.rocketmq.remoting.protocol.RemotingCommand;
-import org.apache.rocketmq.remoting.protocol.ResponseCode;
+import org.apache.rocketmq.common.protocol.RequestCode;
+import org.apache.rocketmq.common.protocol.ResponseCode;
 import org.apache.rocketmq.remoting.netty.NettyDecoder;
 import org.apache.rocketmq.remoting.netty.NettyEncoder;
 
+import java.util.HashMap;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 
@@ -71,9 +73,24 @@ public class BrokerProxy {
         @Override
         protected void channelRead0(ChannelHandlerContext ctx, RemotingCommand msg) throws Exception {
             int requestCode = msg.getCode();
-
+            System.out.println("-------------当前请求是："+RequestCodeUtil.getCodeName(requestCode));
             // 打印请求日志
             System.out.println("[PROXY] Received request with code: " + RequestCodeUtil.getCodeName(requestCode));
+            if (msg.getBody()!=null&&msg.getBody().length!=0) {
+                System.out.println("Body: " + new String(msg.getBody()));
+            }
+
+            if (requestCode== RequestCode.SEND_MESSAGE||requestCode==RequestCode.SEND_MESSAGE_V2) {
+                System.out.println("发送消息，做增强。增强前："+msg);
+                EnhanceUtil.enhanceSendMessageRequest(msg);
+                System.out.println("发送消息，做增强。增强后："+msg);
+                return;
+            }
+//              过滤 HEART_BEAT 请求 ,居然是在心跳时做过滤条件的
+            if (requestCode == RequestCode.HEART_BEAT) {
+                EnhanceUtil.filterPullMessageRequest(msg);
+            }
+
             forwardToBroker(ctx, msg, 0);
         }
 
@@ -105,7 +122,7 @@ public class BrokerProxy {
             f.addListener((ChannelFutureListener) future -> {
                 if (future.isSuccess()) {
                     // 连接成功，保存到连接池
-                    System.out.println("[PROXY] Forwarding request to broker at " + brokerHost + ":" + brokerPort);
+                    System.out.println("[PROXY] 转发请求到 broker at " + brokerHost + ":" + brokerPort+". "+request);
                     Channel newChannel = future.channel();
                     channelPool.put(channelKey, newChannel);
                     
@@ -179,7 +196,7 @@ public class BrokerProxy {
         }
     }
 
-    public static void main(String[] args) throws InterruptedException {
+        public static void main(String[] args) throws InterruptedException {
         // 代理监听8888端口，转发请求到localhost:10911
         BrokerProxy proxy = new BrokerProxy(8888, "localhost", 10911);
         proxy.start();

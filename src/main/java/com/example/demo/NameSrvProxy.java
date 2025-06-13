@@ -10,10 +10,10 @@ import io.netty.channel.socket.nio.NioSocketChannel;
 import org.apache.rocketmq.remoting.netty.NettyDecoder;
 import org.apache.rocketmq.remoting.netty.NettyEncoder;
 import org.apache.rocketmq.remoting.protocol.RemotingCommand;
-import org.apache.rocketmq.remoting.protocol.RequestCode;
-import org.apache.rocketmq.remoting.protocol.ResponseCode;
-import org.apache.rocketmq.remoting.protocol.route.BrokerData;
-import org.apache.rocketmq.remoting.protocol.route.TopicRouteData;
+import  org.apache.rocketmq.common.protocol.RequestCode;
+import org.apache.rocketmq.common.protocol.ResponseCode;
+import org.apache.rocketmq.common.protocol.route.BrokerData;
+import org.apache.rocketmq.common.protocol.route.TopicRouteData;
 
 import java.util.HashMap;
 

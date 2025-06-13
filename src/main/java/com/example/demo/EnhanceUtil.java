@@ -1,8 +1,19 @@
 package com.example.demo;
 
+import com.alibaba.fastjson.JSON;
+import com.alibaba.fastjson.JSONObject;
+import org.apache.commons.lang3.StringUtils;
+import org.apache.rocketmq.common.filter.ExpressionType;
+import org.apache.rocketmq.common.filter.FilterAPI;
+import org.apache.rocketmq.common.message.Message;
+import org.apache.rocketmq.common.message.MessageDecoder;
+import org.apache.rocketmq.common.protocol.heartbeat.ConsumerData;
+import org.apache.rocketmq.common.protocol.heartbeat.HeartbeatData;
+import org.apache.rocketmq.common.protocol.heartbeat.SubscriptionData;
 import org.apache.rocketmq.remoting.protocol.RemotingCommand;
 
 import java.util.HashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * @Description TODO
@@ -11,63 +22,57 @@ import java.util.HashMap;
  **/
 public class EnhanceUtil {
 
+    public static Boolean NEED_TO_FILTER_GRAY = true;
 
     public static RemotingCommand enhanceSendMessageRequest(RemotingCommand original) {
-        // 1. 克隆原始请求（避免污染原始对象）
+        if (!NEED_TO_FILTER_GRAY) {
+            return original;
+        }
+        String properties = original.getExtFields().get("i");
+        HashMap<String, String> propertiesMap = (HashMap<String, String>) MessageDecoder.string2messageProperties(properties);
+        if (!propertiesMap.get("grayNode").equals("true")) {
+            return original;
+        }
+        propertiesMap.put("gray", "true");
+        propertiesMap.put("blue", "oj8k");
+        String newProperties = MessageDecoder.messageProperties2String(propertiesMap);
 
-        // 2. 获取原始properties（可能为null）
-        String originProperties = original.getExtFields().get("properties");
-        HashMap<String, String> propertiesMap = new HashMap<>();
+        original.getExtFields().put("i", newProperties);
 
-        // 3. 解析原始properties（格式：key1=value1;key2=value2）
-        if (originProperties != null && !originProperties.isEmpty()) {
-            String[] kvs = originProperties.split(";");
-            for (String kv : kvs) {
-                String[] pair = kv.split("=", 2);
-                if (pair.length == 2) {
-                    propertiesMap.put(pair[0], pair[1]);
+//        original.setExtFields(propertiesMap);
+//        System.out.println("[PROXY] Added gray mark. New properties: " + newProperties);
+        return original;
+    }
+    public static RemotingCommand filterPullMessageRequest(RemotingCommand command) {
+        if (!NEED_TO_FILTER_GRAY) {
+            return command;
+        }
+        HeartbeatData  heartbeatData = HeartbeatData.decode(command.getBody(), HeartbeatData.class);
+
+        for (ConsumerData consumerData : heartbeatData.getConsumerDataSet()) {
+            for (SubscriptionData subscriptionData : consumerData.getSubscriptionDataSet()) {
+                String expressionType = subscriptionData.getExpressionType();
+                System.out.println("******修改前:"+subscriptionData);
+                if (expressionType.contains(ExpressionType.SQL92)) {
+                    String subString = subscriptionData.getSubString();
+                    if (StringUtils.isBlank(subString)) {
+                        subscriptionData.setSubString("gray IS NOT NULL AND gray = 'true'");
+                    }else {
+                        subscriptionData.setSubString(subString + " AND gray IS NOT NULL AND gray = 'true'");
+                    }
+                    System.out.println("******SQL92修改后:"+subscriptionData);
+                }else{
+                    SubscriptionDataUtil.convertTagToSqlSubscription(subscriptionData);
+                    String subString = subscriptionData.getSubString();
+                    subscriptionData.setSubString(subString + " AND gray IS NOT NULL AND gray = 'true'");
+                    System.out.println("******TAG修改后:"+subscriptionData);
                 }
             }
         }
 
-        // 4. 添加灰度标记
-        propertiesMap.put("gray", "true");
 
-        // 5. 重新拼接properties字符串
-        StringBuilder newProperties = new StringBuilder();
-        propertiesMap.forEach((k, v) -> {
-            if (newProperties.length() > 0) {
-                newProperties.append(";");
-            }
-            newProperties.append(k).append("=").append(v);
-        });
 
-        // 6. 设置回请求中
-        original.addExtField("properties", newProperties.toString());
-
-        System.out.println("[PROXY] Added gray mark. New properties: " + newProperties);
-        return original;
-    }
-    public static RemotingCommand filterPullMessageRequest(RemotingCommand pullRequest) {
-        // 1. 获取消费者组的过滤条件（假设通过扩展字段传递）
-        String consumerGroup = pullRequest.getExtFields().get("consumerGroup");
-        String requiredGray = pullRequest.getExtFields().get("requireGray"); // 例如需要 gray=true
-
-        // 2. 如果不需要过滤，直接返回原始请求
-        if (requiredGray == null || !requiredGray.equals("true")) {
-            return pullRequest;
-        }
-
-        // 3. 修改订阅表达式，添加对 gray=true 的过滤
-        String subscription = pullRequest.getExtFields().get("subscription");
-        if (subscription == null) {
-            subscription = "";
-        }
-
-        // 4. 添加 SQL 过滤条件（假设消息的 user-property 中有 gray 字段）
-        String newSubscription = subscription + " AND gray IS NOT NULL AND gray = 'true'";
-        pullRequest.addExtField("subscription", newSubscription);
-        System.out.println(pullRequest+"----");
-        return pullRequest;
+        command.setBody(HeartbeatData.encode(heartbeatData));
+        return command;
     }
 }
